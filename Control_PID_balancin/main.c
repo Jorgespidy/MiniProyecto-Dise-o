@@ -3,37 +3,71 @@
 /**
  * main.c
  */
-#include <stdbool.h>
+
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
-#include "sensorlib/i2cm_drv.h"
-#include "sensorlib/hw_mpu6050.h"
-#include "sensorlib/mpu6050.h"
+#include "inc/hw_sysctl.h"
+#include "inc/hw_i2c.h"
+#include "inc/hw_gpio.h"
 #include "inc/hw_ints.h"
 #include "inc/hw_memmap.h"
-#include "inc/hw_sysctl.h"
 #include "inc/hw_types.h"
-#include "inc/hw_i2c.h"
-#include "inc/hw_types.h"
-#include "inc/hw_gpio.h"
+#include "driverlib/adc.h"
+#include "driverlib/debug.h"
+#include "driverlib/fpu.h"
 #include "driverlib/gpio.h"
+#include "driverlib/interrupt.h"
 #include "driverlib/pin_map.h"
 #include "driverlib/rom.h"
-#include "driverlib/rom_map.h"
-#include "driverlib/debug.h"
-#include "driverlib/interrupt.h"
-#include "driverlib/i2c.h"
+#include "driverlib/ssi.h"
 #include "driverlib/sysctl.h"
+#include "driverlib/timer.h"
+#include "driverlib/uart.h"
+#include "driverlib/i2c.h"
+#include "utils/uartstdio.h"
+
+
 
 #include <math.h>
+
+// Se agregan las nuevas librerias para i2c y para el mpu6050
+#include "hw_mpu6050.h"
+#include "i2cm_drv.h"
+#include "mpu6050.h"
+
 
 //#include "uart.h"
 #include "utils/uartstdio.h"
 #include "driverlib/uart.h"
 
+//*********
+// Definiciones para configuración del SPI
+//*********
+#define NUM_SPI_DATA    1  // Número de palabras que se envían cada vez
+#define SPI_FREC  4000000  // Frecuencia para el reloj del SPI
+#define SPI_ANCHO      16  // Número de bits que se envían cada vez, entre 4 y 16
+#define frecuenciamuestreo 1000
+
+uint16_t dato;  // Para lo que se envía por SPI.
+uint16_t i=0;
+
+// DEFINICION DE VARIABLES
+
+float ref=0, u_k=0;
+
+float e_k_1 = 0, e_k = 0, E_k = 0, eD = 0, wf0, wf1, wf2;
+float kP=1.0 , kI=0, kD=0 ;
+uint16_t freq_timer = 1000;    // Velocidad con la que se envian datos en Hz
+
+uint16_t u_kint;
+
+int16_t AccelX= 0, AccelY = 0, AccelZ = 0, gyroX = 0, gyroY = 0, gyroZ = 0;
+
+float x = 0.0, y = 0, z = 0;
 //
 // A boolean that is set when a MPU6050 command has completed.
 //
@@ -48,6 +82,80 @@ tI2CMInstance g_sI2CMSimpleInst;
 //Device frequency
 //
 int clockFreq;
+
+
+//*********
+// The interrupt handler for the timer interrupt.
+//*********
+void
+Timer0IntHandler(void)
+{
+
+    // Notar que ahora necesitamos dos espacios para las conversiones.
+    uint32_t pui32ADC0Value[2];
+
+
+    uint32_t pui32DataTx[NUM_SPI_DATA]; // la función put pide tipo uint32_t
+    uint8_t ui32Index;
+
+    // Clear the timer interrupt. Necesario para lanzar la próxima interrupción.
+    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+
+    // Trigger the ADC conversion.
+    ADCProcessorTrigger(ADC0_BASE, 2);
+
+      // Wait for conversion to be completed.
+      while(!ADCIntStatus(ADC0_BASE, 2, false))
+      {
+      }
+
+      // Clear the ADC interrupt flag.
+      ADCIntClear(ADC0_BASE, 2);
+
+      ADCSequenceDataGet(ADC0_BASE, 2, pui32ADC0Value);
+
+      e_k = ref-x;
+      eD = e_k-e_k_1;
+      u_k = kP*e_k + kI*E_k/freq_timer + kD*eD*freq_timer;
+      E_k = E_k + e_k;
+      e_k_1 = e_k;
+
+
+      if (u_k> 6) // Se acota la salida para que se encuentre entre -6 y 6
+         u_k = 6;
+      else if (u_k < -6)
+          u_k = -6;
+
+      u_k = u_k*4095/12;
+
+      u_kint=(uint16_t)(u_k);
+
+    dato=0b0111000000000000|u_kint; // Enviamos el dato al DAC
+
+    pui32DataTx[0] = (uint32_t)(dato);
+
+
+
+////////////////////////////////////////////////
+
+    // Send data
+    for(ui32Index = 0; ui32Index < NUM_SPI_DATA; ui32Index++)
+    {
+        // Send the data using the "blocking" put function.  This function
+        // will wait until there is room in the send FIFO before returning.
+        // This allows you to assure that all the data you send makes it into
+        // the send FIFO.
+        SSIDataPut(SSI0_BASE, pui32DataTx[ui32Index]);
+    }
+
+    // Wait until SSI0 is done transferring all the data in the transmit FIFO.
+    while(SSIBusy(SSI0_BASE))
+    {
+    }
+
+}
+
 
 
 void InitI2C0(void)
@@ -137,9 +245,12 @@ void I2CMSimpleIntHandler(void)
 //
 void MPU6050Example(void)
 {
+    uint_fast16_t pui16Accel[3], pui16Gyro[3];
     float fAccel[3], fGyro[3];
     tMPU6050 sMPU6050;
-    float x = 0, y = 0, z = 0;
+   // uint_fast16_t AccelX = 0, AccelY = 0, AccelZ = 0, gyroX = 0, gyroY = 0, gyroZ = 0;
+
+
 
     //
     // Initialize the MPU6050. This code assumes that the I2C master instance
@@ -191,24 +302,36 @@ void MPU6050Example(void)
         MPU6050DataAccelGetFloat(&sMPU6050, &fAccel[0], &fAccel[1], &fAccel[2]);
         MPU6050DataGyroGetFloat(&sMPU6050, &fGyro[0], &fGyro[1], &fGyro[2]);
         //
+        MPU6050DataAccelGetRaw(&sMPU6050, &pui16Accel[0], &pui16Accel[1], &pui16Accel[2]);
+        MPU6050DataGyroGetRaw(&sMPU6050, &pui16Gyro[0], &pui16Gyro[1], &pui16Gyro[2]);
         // Do something with the new accelerometer and gyroscope readings.
         //
 
-        x = fGyro[0];
-        y = fGyro[1];
-        z = fGyro[2];
+        // datos en bruto del MPU
+        AccelX = pui16Accel[0];
+        AccelY = pui16Accel[1];
+        AccelZ = pui16Accel[2];
 
-        x = (atan2(fAccel[0], sqrt (fAccel[1] * fAccel[1] + fAccel[2] * fAccel[2]))*180.0)/3.14;
+        gyroX = pui16Gyro[0];
+        gyroY = pui16Gyro[1];
+        gyroZ = pui16Gyro[2];
+
+
+
+        x = 1.125*(atan2(fAccel[0], sqrt (fAccel[1] * fAccel[1] + fAccel[2] * fAccel[2]))*180.0)/3.2; //angulo a usar de referencia
 
         y = (atan2(fAccel[1], sqrt (fAccel[0] * fAccel[0] + fAccel[2] * fAccel[2]))*180.0)/3.14;
+        z = fGyro[2];
 
 
-        UARTprintf("Ang. X: %d | Ang. Y: %d | Ang. Z: %d\n", (int)x, (int)y, (int)z);
 
 
-        delayMS(100);
+
+       // delayMS(250);
     }
 }
+
+
 
 
 
