@@ -52,8 +52,9 @@
 #define SPI_ANCHO      16  // Número de bits que se envían cada vez, entre 4 y 16
 #define frecuenciamuestreo 1000
 
-uint16_t dato;  // Para lo que se envía por SPI.
+uint16_t dato;  // dato enviado por SPI
 uint16_t i=0;
+uint16_t contador = 0;
 
 // DEFINICION DE VARIABLES
 
@@ -127,7 +128,7 @@ Timer0IntHandler(void)
       else if (u_k < -6)
           u_k = -6;
 
-      u_k = u_k*4095/12;
+      u_k = u_k*4095/12+2047.5;
 
       u_kint=(uint16_t)(u_k);
 
@@ -135,6 +136,18 @@ Timer0IntHandler(void)
 
     pui32DataTx[0] = (uint32_t)(dato);
 
+
+
+////////////////////////////////////////////////
+
+    if (contador < 100) {
+        contador ++;
+
+    }
+    else{
+             UARTprintf(" %d \n ", (int)x);
+        contador = 0;
+    }
 
 
 ////////////////////////////////////////////////
@@ -183,7 +196,7 @@ void InitI2C0(void)
     I2CMasterInitExpClk(I2C0_BASE, SysCtlClockGet(), true);
 
     // Limpieza de FIFOs
-    HWREG(I2C0_BASE + I2C_O_FIFOCTL) = 80008000; // que es toda esta shit?
+    HWREG(I2C0_BASE + I2C_O_FIFOCTL) = 80008000;
 
     // Inicia I2C master driver
     I2CMInit(&g_sI2CMSimpleInst, I2C0_BASE, INT_I2C0, 0xff, 0xff, SysCtlClockGet());
@@ -202,8 +215,8 @@ void ConfigureUART(void) {
 }
 
 void delayMS(int ms) {
-    ROM_SysCtlDelay( (ROM_SysCtlClockGet()/(3*1000))*ms ) ;  // more accurate
-    //SysCtlDelay( (SysCtlClockGet()/(3*1000))*ms ) ;  // less accurate
+    //ROM_SysCtlDelay( (ROM_SysCtlClockGet()/(3*1000))*ms ) ;  // more accurate
+    SysCtlDelay( (SysCtlClockGet()/(3*1000))*ms ) ;  // less accurate
 }
 
 //
@@ -327,7 +340,7 @@ void MPU6050Example(void)
 
 
 
-       // delayMS(250);
+        //delayMS(100);
     }
 }
 
@@ -337,11 +350,124 @@ void MPU6050Example(void)
 
 int main(void)
 {
-    //clockFreq = SysCtlClockFreqSet(SYSCTL_OSC_INT | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480, 16000000);
-    SysCtlClockSet(SYSCTL_SYSDIV_1 | SYSCTL_USE_PLL | SYSCTL_OSC_INT | SYSCTL_XTAL_16MHZ);
+    //Habilitar Temporizador 0
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+
+
+        // The ADC0 peripheral must be enabled for use.
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+
+        // For this example ADC0 is used with AIN0 and AIN1.
+        // The actual port and pins used may be different on your part, consult
+        // the data sheet for more information.  GPIO port E needs to be enabled
+        // so these pins can be used.
+        // TODO: change this to whichever GPIO port you are using.
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+
+        // Select the analog ADC function for these pins.
+        // Consult the data sheet to see which functions are allocated per pin.
+        // TODO: change this to select the port/pin you are using.
+        GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3);  // Configura el pin PE3
+        GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_2);  // Configura el pin PE2
+
+        // Se configura la secuencia 2, que permitiría hasta cuatro muestras (aunque
+        // se usarán dos).
+        ADCSequenceConfigure(ADC0_BASE, 2, ADC_TRIGGER_PROCESSOR, 0);
+
+        // Step 0 en la secuencia 2: Canal 0 (ADC_CTL_CH0) en modo single-ended (por defecto).
+        ADCSequenceStepConfigure(ADC0_BASE, 2, 0, ADC_CTL_CH0);
+
+        // Step 1 en la secuencia 2: Canal 1 (ADC_CTL_CH1) en modo single-ended (por defecto),
+        // y configura la bandera de interrupción (ADC_CTL_IE) para "setearse"
+        // cuando se tenga esta muestra. También se indica que esta es la última
+        // conversión en la secuencia 2 (ADC_CTL_END).
+        // Para más detalles del módulo ADC, consultar el datasheet.
+        ADCSequenceStepConfigure(ADC0_BASE, 2, 1, ADC_CTL_CH1 | ADC_CTL_IE | ADC_CTL_END);
+
+        // Since sample sequence 2 is now configured, it must be enabled.
+        ADCSequenceEnable(ADC0_BASE, 2);  // Notar el cambio de "secuencia".
+
+        // Clear the interrupt status flag.  This is done to make sure the
+        // interrupt flag is cleared before we sample.
+        ADCIntClear(ADC0_BASE, 2);  // Notar el cambio de "secuencia".
+
+        // Enable the peripherals used by this example.
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+
+        // Enable processor interrupts.
+        IntMasterEnable();
+
+        // Configure the two 32-bit periodic timers.
+        TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
+
+        // El tercer argumento determina la frecuencia. El reloj se puede obtener
+        // con SysCtlClockGet().
+        // La frecuencia está dada por SysCtlClockGet()/(valor del 3er argumento).
+        // Ejemplos: Si se pone SysCtlClockGet(), la frecuencia será de 1 Hz.
+        //           Si se pone SysCtlClockGet()/1000, la frecuencia será de 1 kHz
+        //TimerLoadSet(TIMER0_BASE, TIMER_A, SysCtlClockGet());
+        TimerLoadSet(TIMER0_BASE, TIMER_A, (uint32_t)(SysCtlClockGet()/freq_timer));
+
+        // Setup the interrupt for the timer timeout.
+        IntEnable(INT_TIMER0A);
+        TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+
+        // Enable the timers.
+        TimerEnable(TIMER0_BASE, TIMER_A);
+
+        // Las conversiones se hacen al darse la interrupción del timer, para que
+        // el muestreo sea preciso. Luego de las configuraciones, el programa se
+        // queda en un ciclo infinito haciendo nada.
+
+
+       // The SSI0 peripheral must be enabled for use.
+       SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
+
+       // For this example SSI0 is used with PortA[5:2].  The actual port and pins
+       // used may be different on your part, consult the data sheet for more
+       // information.  GPIO port A needs to be enabled so these pins can be used.
+       // TODO: change this to whichever GPIO port you are using.
+       SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+
+       // Configure the pin muxing for SSI0 functions on port A2, A3, A4, and A5.
+       // This step is not necessary if your part does not support pin muxing.
+       // TODO: change this to select the port/pin you are using.
+       GPIOPinConfigure(GPIO_PA2_SSI0CLK);
+       GPIOPinConfigure(GPIO_PA3_SSI0FSS);
+       GPIOPinConfigure(GPIO_PA4_SSI0RX);
+       GPIOPinConfigure(GPIO_PA5_SSI0TX);
+
+       // Configure the GPIO settings for the SSI pins.  This function also gives
+       // control of these pins to the SSI hardware.  Consult the data sheet to
+       // see which functions are allocated per pin.
+       // The pins are assigned as follows:
+       //      PA5 - SSI0Tx
+       //      PA4 - SSI0Rx
+       //      PA3 - SSI0Fss
+       //      PA2 - SSI0CLK
+       // TODO: change this to select the port/pin you are using.
+       GPIOPinTypeSSI(GPIO_PORTA_BASE, GPIO_PIN_5 | GPIO_PIN_4 | GPIO_PIN_3 |
+                      GPIO_PIN_2);
+
+       // Configure and enable the SSI port for SPI master mode.  Use SSI0,
+       // system clock supply, idle clock level low and active low clock in
+       // freescale SPI mode, master mode, 4MHz SSI frequency, and 16-bit data.
+       // For SPI mode, you can set the polarity of the SSI clock when the SSI
+       // unit is idle.  You can also configure what clock edge you want to
+       // capture data on.  Please reference the datasheet for more information on
+       // the different SPI modes.
+       SSIConfigSetExpClk(SSI0_BASE, SysCtlClockGet(), SSI_FRF_MOTO_MODE_0,
+                          SSI_MODE_MASTER, SPI_FREC, SPI_ANCHO);
+
+       // Enable the SSI0 module.
+       SSIEnable(SSI0_BASE);
+
 
     InitI2C0();
     ConfigureUART();
     MPU6050Example();
+
+
+
     return(0);
 }
